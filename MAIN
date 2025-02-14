@@ -168,17 +168,16 @@ def schedule_kit_status_update(collection, user):
 
 if _name_ == "_main_":
     # Hard-coded values
-    visionXId = "VKS-QS-001"  # Replace with actual serial number
+    visionXId = "VKS-QS-002"  # Replace with actual serial number
 
 
 
     user = {"visionXId": visionXId}
 
     camera_details = [
-        {'ip': '192.168.0.3','position': 'Entrance', 'camera_ip': '192.168.0.3', 'rtsp': 'rtsp://admin:admin@192.168.0.3/stream'},
-        {'ip': '192.168.0.4','position': 'Kitchen', 'camera_ip': '192.168.0.4', 'rtsp': 'rtsp://admin:admin@192.168.0.4/stream'},
-        {'ip': '192.168.0.2','position': 'Conference Hall', 'camera_ip': '192.168.0.2', 'rtsp': 'rtsp://admin:admin@192.168.0.2/stream'},
-	{'ip': '192.168.0.5','position': 'Test Camera', 'camera_ip': '192.168.0.5', 'rtsp': 'rtsp://admin:admin@192.168.0.5/stream'},
+        {'ip': '192.168.0.6','position': 'DEMO CAM/11', 'camera_ip': '192.168.0.6', 'rtsp': 'rtsp://admin:12345@192.168.0.6/stream'},
+	    {'ip': '192.168.0.2','position': 'DEMO CAM/22', 'camera_ip': '192.168.0.2', 'rtsp': 'rtsp://admin:12345@192.168.0.2/stream'},
+                # Add more cameras as needed
     ]
 
     collection = connect_to_mongodb("mongodb+srv://quantumsharqofficial:g5mlXJZDMu1XPXkl@visionx.vnotu.mongodb.net/?retryWrites=true&w=majority", "visionX", "camera_statuses")
