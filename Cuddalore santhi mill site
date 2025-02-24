@@ -1,0 +1,205 @@
+import subprocess
+import platform
+import pymongo
+import requests
+import cv2
+import numpy as np
+import logging
+import time
+from threading import Timer
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M')
+
+def ping_ip_camera(ip_address, count=4):
+    param = '-n' if platform.system().lower() == 'windows' else '-c'
+    try:
+        response = subprocess.run(['ping', param, str(count), ip_address], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return response.returncode == 0
+    except Exception as e:
+        logging.error(f"An error occurred while pinging {ip_address}: {e}")
+        return False
+
+def connect_to_mongodb(uri, db_name, collection_name):
+    try:
+        client = pymongo.MongoClient(uri)
+        db = client[db_name]
+        collection = db[collection_name]
+        return collection
+    except Exception as e:
+        logging.error(f"An error occurred while connecting to MongoDB: {e}")
+        exit(1)
+
+def push_status_to_mongodb(collection, camera_statuses, user):
+    try:
+        data = {
+            "visionXId": user['visionXId'],
+            "cameraStatuses": camera_statuses
+        }
+        print(data)
+
+        existing_user = collection.find_one({"visionXId": user["visionXId"]})
+
+        if existing_user:
+            url = "https://visionx.quantumsharq.com/api/kit/update-kit"
+            requests.patch(url, json=data)
+            logging.info(f"Updated status for user {user['visionXId']} in MongoDB.")
+        else:
+            collection.insert_one(data)
+            logging.info(f"Inserted initial status for user {user['visionXId']} to MongoDB.")
+
+    except Exception as e:
+        logging.error(f"An error occurred while updating status for user {user['visionXId']} in MongoDB: {e}")
+
+def check_camera_coverage(rtsp_url):
+    cap = cv2.VideoCapture(rtsp_url)
+    if not cap.isOpened():
+        logging.error("Error: Could not open RTSP stream.")
+        return "Error"
+
+    ret, frame = cap.read()
+    if not ret:
+        logging.error("Unable to read frame from RTSP stream.")
+        return "Disconnected"
+
+    # Convert frame to grayscale and apply Gaussian blur
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (21, 21), 0)
+
+    # Calculate average brightness
+    avg_brightness = np.mean(blurred)
+
+    # Calculate edge density using Canny edge detection
+    edges = cv2.Canny(blurred, 50, 150)
+    edge_density = np.sum(edges) / edges.size
+
+    # Detect unique colors (for obstruction uniformity analysis)
+    unique_colors = len(np.unique(gray))
+
+    # Define thresholds for different conditions
+    brightness_threshold = 40  # Normal brightness threshold
+    edge_threshold = 0.01  # Minimum edge density for proper view
+    night_vision_brightness_threshold = 15  # Night vision brightness threshold
+    uniformity_threshold = 10  # Minimum unique colors for non-uniform obstruction
+
+    # Night vision check: If brightness is below 80, assume night vision mode
+    night_vision_brightness = avg_brightness if avg_brightness < 80 else None
+
+    # Determine coverage status based on combined conditions
+    if night_vision_brightness is not None and night_vision_brightness < night_vision_brightness_threshold:
+        coverage_status = "Night vision interrupted (too dark)"
+    elif avg_brightness < brightness_threshold or edge_density < edge_threshold or unique_colors < uniformity_threshold:
+        coverage_status = "Screen is interrupted"
+    else:
+        coverage_status = "Screen not interrupted"
+
+    cap.release()
+    return coverage_status
+
+def monitor_cameras(camera_details, user, collection, last_statuses):
+    camera_statuses = []
+    physical_change_detected = False  # Track if any physical change occurred
+
+    for i, details in enumerate(camera_details):
+        camera_ip = details['camera_ip']
+        rtsp_url = details['rtsp']
+        position = details.get('position', f"Camera {i+1}")  # Retrieve the position
+        camera_number = f"{i+1}"
+        ip = details.get('ip', f"Camera {i+1}")
+
+        is_connected = ping_ip_camera(camera_ip)
+        status = "Online" if is_connected else "Offline"
+        coverage_status = None
+
+        if status == "Online":
+            coverage_status = check_camera_coverage(rtsp_url)
+
+        last_status = last_statuses.get(camera_number, {"status": None, "Coverage": None})
+        status_changed = status != last_status["status"]
+        coverage_changed = coverage_status != last_status["Coverage"]
+
+        # Detect physical change
+        if status_changed or coverage_changed:
+            physical_change_detected = True
+
+        # Store current camera status with position
+        camera_statuses.append({
+            "cameraNumber": camera_number,
+            "camera_ip": camera_ip,
+            "status": status,
+            "Coverage": coverage_status,
+            "cameraPosition": position,  # Include position
+            "ip": ip #include ip 
+        })
+        last_statuses[camera_number] = {"status": status, "Coverage": coverage_status}
+
+    # Push the status of all cameras to MongoDB if any physical change is detected
+    if physical_change_detected:
+        push_status_to_mongodb(collection, camera_statuses, user)
+
+def send_kit_status(collection, user):
+    
+    # Prepare the data to send to MongoDB or API
+    try:
+ 
+        data = {
+            "visionXId": user['visionXId'],       # Ensure visionXId is included
+            "kitStatus": "working"              # Send the formatted kit status                 
+        }
+
+        print(data)
+
+        existing_user = collection.find_one({"visionXId": user["visionXId"]})
+
+        if existing_user:
+            url = "https://visionx.quantumsharq.com/api/kit/update-kitstatus"
+            requests.patch(url, json=data)
+            logging.info(f"Updated status for user {user['visionXId']} in MongoDB.")
+        else:
+            collection.insert_one(data)
+            logging.info(f"Inserted initial status for user {user['visionXId']} to MongoDB.")
+
+    except Exception as e:
+        logging.error(f"An error occurred while updating status for user {user['visionXId']} in MongoDB: {e}")
+
+def schedule_kit_status_update(collection, user):
+    # Schedule the kit status to be sent every 30 minutes
+    send_kit_status(collection, user)
+    Timer(600, schedule_kit_status_update, [collection, user]).start()  # 1800 seconds = 30 minutes
+
+if __name__ == "__main__":
+    # Hard-coded values
+    visionXId = "SM-CUD-KK-001"  # Replace with actual serial number
+
+
+
+    user = {"visionXId": visionXId}
+
+    camera_details = [
+        {'ip': '192.168.31.14','position': 'D1', 'camera_ip': '192.168.31.14', 'rtsp': 'rtsp://admin:admin@123@192.168.31.14:554'},
+        {'ip': '192.168.31.15','position': 'D2', 'camera_ip': '192.168.31.15', 'rtsp': 'rtsp://admin:admin@123@192.168.31.15:554'},
+	      {'ip': '192.168.31.16','position': 'D3', 'camera_ip': '192.168.31.16', 'rtsp': 'rtsp://admin:admin@123@192.168.31.16:554'},
+        {'ip': '192.168.31.17','position': 'D4', 'camera_ip': '192.168.31.17', 'rtsp': 'rtsp://admin:admin@123@192.168.31.17:554'},
+	      {'ip': '192.168.31.18','position': 'D5', 'camera_ip': '192.168.31.18', 'rtsp': 'rtsp://admin:admin@123@192.168.31.18:554'},
+        {'ip': '192.168.31.19','position': 'D6', 'camera_ip': '192.168.31.19', 'rtsp': 'rtsp://admin:admin@123@192.168.31.19:554'},
+	      {'ip': '192.168.31.20','position': 'D7', 'camera_ip': '192.168.31.20', 'rtsp': 'rtsp://admin:admin@123@192.168.31.20:554'},
+        {'ip': '192.168.31.21','position': 'D8', 'camera_ip': '192.168.31.21', 'rtsp': 'rtsp://admin:admin@123@192.168.31.21:554'},
+	      {'ip': '192.168.31.22','position': 'D9', 'camera_ip': '192.168.31.22', 'rtsp': 'rtsp://admin:admin@123@192.168.31.22:554'},
+        {'ip': '192.168.31.23','position': 'D10', 'camera_ip': '192.168.31.23', 'rtsp': 'rtsp://admin:admin@123@192.168.31.23:554'},
+	      {'ip': '192.168.31.11','position': 'D11', 'camera_ip': '192.168.31.11', 'rtsp': 'rtsp://admin:admin@123@192.168.31.11:554'},
+        {'ip': '192.168.31.24','position': 'D12', 'camera_ip': '192.168.31.24', 'rtsp': 'rtsp://admin:admin@123@192.168.31.24:554'},
+	      {'ip': '192.168.31.10','position': 'D13', 'camera_ip': '192.168.31.10', 'rtsp': 'rtsp://admin:admin@123@192.168.31.10:554'},
+       
+        # Add more cameras as needed
+    ]
+
+    collection = connect_to_mongodb("mongodb+srv://quantumsharqofficial:g5mlXJZDMu1XPXkl@visionx.vnotu.mongodb.net/?retryWrites=true&w=majority", "visionX", "camera_statuses")
+    last_statuses = {}
+
+    monitor_cameras(camera_details, user, collection, last_statuses)
+
+    # Schedule the kit status update every 30 minutes
+    schedule_kit_status_update(collection, user)
+
+    while True:
+        monitor_cameras(camera_details, user, collection, last_statuses)
+        time.sleep(5)
