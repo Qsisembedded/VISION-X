@@ -166,7 +166,7 @@ def schedule_kit_status_update(collection, user):
     send_kit_status(collection, user)
     Timer(600, schedule_kit_status_update, [collection, user]).start()  # 1800 seconds = 30 minutes
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     # Hard-coded values
     visionXId = "VKS-QS-002"  # Replace with actual serial number
 
